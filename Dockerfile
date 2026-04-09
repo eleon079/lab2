@@ -1,18 +1,16 @@
-FROM python:3.10-slim
-
-# Keep logs unbuffered (nice for Docker logs)
-ENV PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PORT=5000
+FROM python:3.11-slim
 
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install --upgrade pip && pip install -r requirements.txt
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
 
-COPY app.py .
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+COPY . .
 
 EXPOSE 5000
 
-# Serve with waitress (production-ish)
 CMD ["waitress-serve", "--host=0.0.0.0", "--port=5000", "app:app"]

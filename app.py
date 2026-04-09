@@ -1,30 +1,92 @@
-from flask import Flask, request, jsonify
-from dotenv import load_dotenv
-from PIL import Image
+import base64
+import io
+import os
+
 import numpy as np
 import torch
-import os
-import uuid
-
-from config import Config
-from model import build_model, load_trained_model
-from utils import (
-    preprocess_image_for_inference,
-    save_prediction_outputs,
-    ensure_dir,
-)
+import segmentation_models_pytorch as smp
+from dotenv import load_dotenv
+from flask import Flask, jsonify, request
+from PIL import Image
 
 load_dotenv()
 
 app = Flask(__name__)
-app.config["SECRET_KEY"] = Config.SECRET_KEY
 
-ensure_dir(Config.OUTPUT_DIR)
+PORT = int(os.getenv("PORT", "5000"))
+MODEL_PATH = os.getenv("MODEL_PATH", "artifacts/best_model.pth")
+IMAGE_SIZE = int(os.getenv("IMAGE_SIZE", "256"))
+THRESHOLD = float(os.getenv("THRESHOLD", "0.5"))
+DEVICE = os.getenv("DEVICE", "cuda" if torch.cuda.is_available() else "cpu")
+ENCODER_NAME = os.getenv("ENCODER_NAME", "resnet34")
 
-device = torch.device(Config.DEVICE)
-model = build_model()
-model = load_trained_model(model, Config.MODEL_PATH, device)
-model.eval()
+_model = None
+
+
+def build_model():
+    model = smp.Unet(
+        encoder_name=ENCODER_NAME,
+        encoder_weights=None,
+        in_channels=3,
+        classes=1,
+    )
+    return model
+
+
+def load_model():
+    global _model
+    if _model is not None:
+        return _model
+
+    if os.getenv("SKIP_MODEL_LOAD", "false").lower() == "true":
+        class DummyModel(torch.nn.Module):
+            def forward(self, x):
+                batch, _, h, w = x.shape
+                return torch.zeros((batch, 1, h, w), dtype=torch.float32, device=x.device)
+
+        _model = DummyModel().to(DEVICE).eval()
+        return _model
+
+    if not os.path.exists(MODEL_PATH):
+        raise FileNotFoundError(
+            f"Model file not found at '{MODEL_PATH}'. Train the model first or update MODEL_PATH in .env."
+        )
+
+    model = build_model()
+    checkpoint = torch.load(MODEL_PATH, map_location=DEVICE)
+
+    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+        model.load_state_dict(checkpoint["model_state_dict"])
+    else:
+        model.load_state_dict(checkpoint)
+
+    model.to(DEVICE)
+    model.eval()
+    _model = model
+    return _model
+
+
+def preprocess_image(image: Image.Image):
+    image = image.convert("RGB")
+    original_w, original_h = image.size
+    resized = image.resize((IMAGE_SIZE, IMAGE_SIZE))
+    arr = np.array(resized).astype(np.float32) / 255.0
+    arr = np.transpose(arr, (2, 0, 1))  # HWC -> CHW
+    tensor = torch.tensor(arr, dtype=torch.float32).unsqueeze(0).to(DEVICE)
+    return tensor, (original_w, original_h)
+
+
+def postprocess_mask(mask_probs: np.ndarray, original_size):
+    mask = (mask_probs >= THRESHOLD).astype(np.uint8) * 255
+    mask_img = Image.fromarray(mask, mode="L")
+    mask_img = mask_img.resize(original_size, Image.NEAREST)
+    return mask_img
+
+
+def image_to_base64_png(img: Image.Image) -> str:
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG")
+    return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
 
 @app.get("/")
@@ -33,69 +95,71 @@ def home():
         message="House segmentation service is running.",
         endpoints={
             "health": "GET /health",
-            "predict": "POST /predict with JSON {'image_path': '...'}"
+            "predict": "POST /predict with multipart/form-data field named 'image'"
         }
     )
 
 
 @app.get("/health")
 def health():
+    model_status = "loaded"
+    try:
+        load_model()
+    except Exception as exc:
+        model_status = f"error: {str(exc)}"
+
     return jsonify(
         status="ok",
-        model_path=Config.MODEL_PATH,
-        device=Config.DEVICE,
-        image_size=Config.IMAGE_SIZE
+        task="house-segmentation",
+        model_path=MODEL_PATH,
+        encoder_name=ENCODER_NAME,
+        image_size=IMAGE_SIZE,
+        threshold=THRESHOLD,
+        device=DEVICE,
+        model_status=model_status,
     )
 
 
 @app.post("/predict")
 def predict():
-    data = request.get_json(silent=True) or {}
-    image_path = data.get("image_path")
-
-    if not image_path or not isinstance(image_path, str):
+    if "image" not in request.files:
         return jsonify(
-            error='Invalid input. Provide JSON: {"image_path": "path/to/image.png"}'
+            error="Invalid request. Send multipart/form-data with a file field named 'image'."
         ), 400
 
-    if not os.path.exists(image_path):
-        return jsonify(error=f"Image file not found: {image_path}"), 400
+    file = request.files["image"]
+    if file.filename == "":
+        return jsonify(error="No file selected."), 400
 
     try:
-        original_image = Image.open(image_path).convert("RGB")
-    except Exception as e:
-        return jsonify(error=f"Failed to open image: {str(e)}"), 400
+        image = Image.open(file.stream).convert("RGB")
+    except Exception:
+        return jsonify(error="Uploaded file is not a valid image."), 400
 
-    image_tensor, original_np = preprocess_image_for_inference(
-        original_image,
-        image_size=Config.IMAGE_SIZE,
-        device=device
-    )
+    model = load_model()
+    tensor, original_size = preprocess_image(image)
 
     with torch.no_grad():
-        logits = model(image_tensor)
-        probs = torch.sigmoid(logits)
-        pred_mask = (probs > Config.THRESHOLD).float()
+        logits = model(tensor)
+        probs = torch.sigmoid(logits)[0, 0].detach().cpu().numpy()
 
-    pred_mask_np = pred_mask.squeeze().cpu().numpy().astype(np.uint8) * 255
-
-    run_id = uuid.uuid4().hex[:8]
-    mask_path, overlay_path = save_prediction_outputs(
-        original_np=original_np,
-        pred_mask_np=pred_mask_np,
-        output_dir=Config.OUTPUT_DIR,
-        base_name=f"prediction_{run_id}"
-    )
+    mask_img = postprocess_mask(probs, original_size)
+    mask_arr = np.array(mask_img)
+    positive_pixels = int((mask_arr > 0).sum())
+    total_pixels = int(mask_arr.size)
+    house_pixel_ratio = float(positive_pixels / max(total_pixels, 1))
 
     return jsonify(
-        status="ok",
-        model_path=Config.MODEL_PATH,
-        image_path=image_path,
-        mask_path=mask_path,
-        overlay_path=overlay_path,
-        threshold=Config.THRESHOLD
+        task="house-segmentation",
+        width=original_size[0],
+        height=original_size[1],
+        threshold=THRESHOLD,
+        positive_pixels=positive_pixels,
+        total_pixels=total_pixels,
+        house_pixel_ratio=house_pixel_ratio,
+        mask_png_base64=image_to_base64_png(mask_img),
     )
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=Config.PORT, debug=(Config.FLASK_ENV == "development"))
+    app.run(host="0.0.0.0", port=PORT, debug=True)

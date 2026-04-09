@@ -1,21 +1,16 @@
-# HuggingFace Model Service (Flask + Waitress + Docker)
+# House Segmentation Service (Flask + Waitress + Docker)
 
-## Build
-docker build -t eleon079/hf-waitress-service:latest .
+This project replaces the original text sentiment model with a house-segmentation model for aerial imagery.
 
-## Run
-docker run --rm -p 5000:5000 eleon079/hf-waitress-service:latest
+## 1. Create local environment file
 
-## Test
-### Health
-curl http://localhost:5000/health
+Copy `.env.example` to `.env` and edit values if needed.
 
-### Predict
-curl -X POST http://localhost:5000/predict ^
-  -H "Content-Type: application/json" ^
-  -d "{\"text\":\"I love this class!\"}"
+## 2. Prepare from Hugging Face
 
+This project downloads an aerial building-segmentation dataset from Hugging Face and converts it into the local training layout expected by the training script.
 
+Generate masks and train/val/test splits:
 
-## Docker Hub Link
-https://hub.docker.com/r/eleon079/hf-waitress-service
+```bash
+python prepare_dataset.py

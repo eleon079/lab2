@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+
+
+
+# Environment / secrets
+.env
+
+# Data and model artifacts
+data/raw/
+data/processed/
+artifacts/
+reports/
+frames/
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+screen captures/
+
+.hf_cache/

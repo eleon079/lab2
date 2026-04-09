@@ -1,0 +1,20 @@
+# Ignore everything by default
+**
+
+# Keep core app/build files
+!Dockerfile
+!requirements.txt
+!app.py
+!README.md
+!.env
+
+# Keep trained model only
+!artifacts/
+!artifacts/best_model.pth
+
+# Keep only test images for validation
+!data/
+!data/processed/
+!data/processed/test/
+!data/processed/test/images/
+!data/processed/test/images/**
